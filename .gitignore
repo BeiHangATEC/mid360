@@ -1,0 +1,16 @@
+# ROS and colcon build outputs
+ws_livox/build/
+ws_livox/install/
+ws_livox/log/
+ws_livox/devel/
+
+# Preserved nested repository metadata
+ws_livox/src/FAST_LIO/.git.local-backup/
+ws_livox/src/FAST_LIO/include/ikd-Tree/.git.local-backup
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
