@@ -19,12 +19,14 @@ class LivePointCloudToGrid(Node):
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter("frame_id", "camera_init")
         self.declare_parameter("resolution", 0.05)
-        self.declare_parameter("min_z", -0.2)
-        self.declare_parameter("max_z", 1.8)
+        self.declare_parameter("min_z", -0.8)
+        self.declare_parameter("max_z", 0.8)
         self.declare_parameter("publish_rate", 2.0)
         self.declare_parameter("margin_cells", 20)
         self.declare_parameter("raytrace", True)
         self.declare_parameter("max_range", 30.0)
+        self.declare_parameter("process_every_n", 1)
+        self.declare_parameter("point_stride", 1)
 
         self.input_topic = self.get_parameter("input_topic").value
         self.odom_topic = self.get_parameter("odom_topic").value
@@ -37,6 +39,8 @@ class LivePointCloudToGrid(Node):
         self.margin_cells = int(self.get_parameter("margin_cells").value)
         self.raytrace = bool(self.get_parameter("raytrace").value)
         self.max_range = float(self.get_parameter("max_range").value)
+        self.process_every_n = max(1, int(self.get_parameter("process_every_n").value))
+        self.point_stride = max(1, int(self.get_parameter("point_stride").value))
 
         self.free_cells = set()
         self.occupied_cells = set()
@@ -47,6 +51,7 @@ class LivePointCloudToGrid(Node):
         self.last_added = 0
         self.sensor_xy = None
         self.warned_no_odom = False
+        self.cloud_count = 0
 
         sub_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -63,7 +68,7 @@ class LivePointCloudToGrid(Node):
         self.timer = self.create_timer(1.0 / self.publish_rate, self.publish_grid)
 
         self.get_logger().info(
-            "Projecting %s to %s at %.3fm resolution, z=[%.2f, %.2f], raytrace=%s"
+            "Projecting %s to %s at %.3fm resolution, z=[%.2f, %.2f], raytrace=%s, process_every_n=%d, point_stride=%d"
             % (
                 self.input_topic,
                 self.map_topic,
@@ -71,6 +76,8 @@ class LivePointCloudToGrid(Node):
                 self.min_z,
                 self.max_z,
                 self.raytrace,
+                self.process_every_n,
+                self.point_stride,
             )
         )
 
@@ -125,6 +132,10 @@ class LivePointCloudToGrid(Node):
         self.include_cell_in_bounds(ix, iy)
 
     def cloud_callback(self, msg):
+        self.cloud_count += 1
+        if self.cloud_count % self.process_every_n != 0:
+            return
+
         if self.raytrace and self.sensor_xy is None:
             if not self.warned_no_odom:
                 self.get_logger().warn("Waiting for odometry before raytracing /map")
@@ -138,9 +149,12 @@ class LivePointCloudToGrid(Node):
             sensor_ix = math.floor(self.sensor_xy[0] / self.resolution)
             sensor_iy = math.floor(self.sensor_xy[1] / self.resolution)
 
-        for row in point_cloud2.read_points(
+        for row_index, row in enumerate(point_cloud2.read_points(
             msg, field_names=("x", "y", "z"), skip_nans=True
-        ):
+        )):
+            if row_index % self.point_stride != 0:
+                continue
+
             if hasattr(row, "dtype") and row.dtype.names:
                 x = float(row["x"])
                 y = float(row["y"])
@@ -161,9 +175,11 @@ class LivePointCloudToGrid(Node):
             iy = math.floor(y / self.resolution)
             cell = (ix, iy)
             if self.raytrace and sensor_ix is not None and sensor_iy is not None:
-                ray_cells = list(self.bresenham(sensor_ix, sensor_iy, ix, iy))
-                for free_ix, free_iy in ray_cells[:-1]:
-                    self.mark_free(free_ix, free_iy)
+                prev_cell = None
+                for ray_ix, ray_iy in self.bresenham(sensor_ix, sensor_iy, ix, iy):
+                    if prev_cell is not None:
+                        self.mark_free(prev_cell[0], prev_cell[1])
+                    prev_cell = (ray_ix, ray_iy)
                 if cell not in self.occupied_cells:
                     added += 1
                 self.mark_occupied(ix, iy)
@@ -202,7 +218,11 @@ class LivePointCloudToGrid(Node):
             if min_ix <= ix <= max_ix and min_iy <= iy <= max_iy:
                 data[(iy - min_iy) * width + (ix - min_ix)] = 100
         grid.data = data
-        self.publisher.publish(grid)
+        try:
+            self.publisher.publish(grid)
+        except Exception:
+            if rclpy.ok():
+                raise
 
 
 def main():

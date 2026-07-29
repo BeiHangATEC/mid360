@@ -115,8 +115,8 @@ tools/live_pointcloud_to_grid.py
 
 ```text
 resolution = 0.03 m
-min_z = -1.6 m
-max_z = 0.1 m
+min_z = -0.8 m
+max_z = 0.8 m
 raytrace = true
 max_range = 50.0 m
 margin_cells = 200
@@ -235,8 +235,8 @@ python3 tools/live_pointcloud_to_grid.py \
   -p map_topic:=/map \
   -p frame_id:=camera_init \
   -p resolution:=0.03 \
-  -p min_z:=-1.6 \
-  -p max_z:=0.1 \
+  -p min_z:=-0.8 \
+  -p max_z:=0.8 \
   -p publish_rate:=2.0 \
   -p raytrace:=true \
   -p max_range:=50.0 \
@@ -305,11 +305,11 @@ ros2 run rviz2 rviz2 -d /home/hu/Desktop/bxi/mid360/ws_livox/src/FAST_LIO/rviz/f
 - 不是自动识别的地面高度
 - RViz 的倒装显示不影响高度判断
 
-示例：最低 `-1.6m`，最高 `0.1m`：
+示例：最低 `-0.8m`，最高 `0.8m`：
 
 ```bash
--p min_z:=-1.6
--p max_z:=0.1
+-p min_z:=-0.8
+-p max_z:=0.8
 ```
 
 修改高度后，需要重启 `tools/live_pointcloud_to_grid.py` 节点。
@@ -458,9 +458,92 @@ maps/
 - 如果漂移严重，重新启动 FAST-LIO，从静止状态开始。
 - 回到起点附近闭合一圈，通常地图整体效果更好。
 
-## 9. 已知问题
+## 9. FAST-LIO + pointcloud_to_laserscan + slam_toolbox 方案
 
-### 9.1 RViz Map 插件 OpenGL 警告
+这套方案已在项目里单独做成 ROS2 包：
+
+```text
+ws_livox/src/mid360_slam_toolbox
+```
+
+链路是：
+
+```text
+MID360
+  -> livox_ros_driver2
+  -> /livox/lidar + /livox/imu
+  -> FAST-LIO
+  -> /cloud_registered_body
+  -> pointcloud_to_laserscan
+  -> /scan
+  -> slam_toolbox
+  -> /map
+```
+
+这套方案使用 FAST-LIO 提供位姿和去畸变后的 body-frame 点云，不使用 `tools/live_pointcloud_to_grid.py`。
+
+### 9.1 安装依赖
+
+当前系统如果还没有安装这两个包，需要先执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ros-humble-pointcloud-to-laserscan ros-humble-slam-toolbox
+```
+
+### 9.2 编译配置包
+
+```bash
+cd /home/hu/Desktop/bxi/mid360/ws_livox
+source /opt/ros/humble/setup.bash
+colcon build --packages-select mid360_slam_toolbox --symlink-install
+source install/setup.bash
+```
+
+### 9.3 启动
+
+```bash
+cd /home/hu/Desktop/bxi/mid360
+source /opt/ros/humble/setup.bash
+source ws_livox/install/setup.bash
+ros2 launch mid360_slam_toolbox mid360_slam_toolbox.launch.py
+```
+
+默认参数：
+
+```text
+输入点云: /cloud_registered_body
+输出激光: /scan
+输出地图: /map
+FAST-LIO odom TF: camera_init -> body
+slam_toolbox TF: map -> camera_init
+base_frame: body
+odom_frame: camera_init
+高度范围: -0.8 m 到 0.8 m
+range_min: 0.3 m
+range_max: 25.0 m
+angle_increment: 0.5 deg
+```
+
+如果已经单独启动了 Livox 驱动或 FAST-LIO，可以关闭对应启动项：
+
+```bash
+ros2 launch mid360_slam_toolbox mid360_slam_toolbox.launch.py start_livox:=false
+ros2 launch mid360_slam_toolbox mid360_slam_toolbox.launch.py start_fast_lio:=false
+```
+
+后续接入真实或仿真的底盘后，应改成：
+
+```text
+base_frame = base_link
+odom_frame = odom
+```
+
+并提供 `odom -> base_link` 的 TF。
+
+## 10. 已知问题
+
+### 10.1 RViz Map 插件 OpenGL 警告
 
 RViz 有时会输出类似：
 
@@ -470,11 +553,11 @@ active samplers with a different type refer to the same texture image unit
 
 这是当前虚拟机/OpenGL 环境下 RViz Map shader 的警告。只要 RViz 能显示 `/map`，一般可以忽略。
 
-### 9.2 Livox 驱动退出时报 `exit code -11`
+### 10.2 Livox 驱动退出时报 `exit code -11`
 
 停止 Livox 驱动时，日志里可能出现 SDK deinit 后 `exit code -11`。目前观察到雷达 SDK 已经完成释放，不影响建图和保存的地图文件。
 
-### 9.3 当前 2D 地图还不是完整 Nav2 导航地图
+### 10.3 2D OccupancyGrid 还需要导航侧处理
 
 当前 `/map` 已经是 OccupancyGrid，并且有未知/空闲/占用三态。
 
@@ -486,7 +569,7 @@ active samplers with a different type refer to the same texture image unit
 - 可通行区域清理
 - 机器人 footprint/costmap 参数
 
-## 10. 快速恢复当前 2D 建图状态
+## 11. 快速恢复当前 2D 建图状态
 
 按顺序运行：
 
@@ -501,34 +584,7 @@ ros2 launch livox_ros_driver2 msg_MID360_launch.py
 cd /home/hu/Desktop/bxi/mid360
 source /opt/ros/humble/setup.bash
 source ws_livox/install/setup.bash
-ros2 launch fast_lio mapping.launch.py \
-  config_path:=/home/hu/Desktop/bxi/mid360/ws_livox/src/FAST_LIO/config \
-  config_file:=mid360.yaml \
-  rviz:=false
+ros2 launch mid360_slam_toolbox mid360_slam_toolbox.launch.py start_livox:=false
 ```
 
-```bash
-cd /home/hu/Desktop/bxi/mid360
-source /opt/ros/humble/setup.bash
-source ws_livox/install/setup.bash
-python3 tools/live_pointcloud_to_grid.py \
-  --ros-args \
-  -p input_topic:=/cloud_registered \
-  -p odom_topic:=/Odometry \
-  -p map_topic:=/map \
-  -p frame_id:=camera_init \
-  -p resolution:=0.03 \
-  -p min_z:=-1.6 \
-  -p max_z:=0.1 \
-  -p publish_rate:=2.0 \
-  -p raytrace:=true \
-  -p max_range:=50.0 \
-  -p margin_cells:=200
-```
-
-```bash
-cd /home/hu/Desktop/bxi/mid360
-source /opt/ros/humble/setup.bash
-source ws_livox/install/setup.bash
-ros2 run rviz2 rviz2 -d /home/hu/Desktop/bxi/mid360/ws_livox/src/FAST_LIO/rviz/fastlio_2d.rviz
-```
+启动后先让 MID360 静止 3 到 5 秒，等 FAST-LIO 完成 IMU 初始化后再缓慢移动。

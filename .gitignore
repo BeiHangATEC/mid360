@@ -14,3 +14,7 @@ ws_livox/src/FAST_LIO/include/ikd-Tree/.git.local-backup
 *.swp
 .DS_Store
 Thumbs.db
+
+# Python caches
+**/__pycache__/
+*.pyc
