@@ -10,7 +10,7 @@
 
 - 激光雷达：Livox MID360
 - 雷达 IP：`192.168.1.110`
-- 主机有线网卡 IP：`192.168.1.5`
+- 主机有线网卡 IP：`192.168.1.51`
 - 雷达驱动已经可以稳定收到数据。
 - 原始点云话题：
   - `/livox/lidar`
@@ -29,7 +29,7 @@
 - 配置文件：
   - `ws_livox/src/livox_ros_driver2/config/MID360_config.json`
   - `ws_livox/install/livox_ros_driver2/share/livox_ros_driver2/config/MID360_config.json`
-- 已将 `host_net_info` 配成主机 IP `192.168.1.5` 对应雷达 IP `192.168.1.110`。
+- 已将 `host_net_info` 配成主机 IP `192.168.1.51` 对应雷达 IP `192.168.1.110`。
 
 已修复 Livox ROS2 驱动收到数据但不发布话题的问题：
 
@@ -519,7 +519,7 @@ FAST-LIO odom TF: camera_init -> body
 slam_toolbox TF: map -> camera_init
 base_frame: body
 odom_frame: camera_init
-高度范围: -0.8 m 到 0.8 m
+高度范围: -0.2 m 到 1.2 m
 range_min: 0.3 m
 range_max: 25.0 m
 angle_increment: 0.5 deg
@@ -588,3 +588,122 @@ ros2 launch mid360_slam_toolbox mid360_slam_toolbox.launch.py start_livox:=false
 ```
 
 启动后先让 MID360 静止 3 到 5 秒，等 FAST-LIO 完成 IMU 初始化后再缓慢移动。
+
+## 12. 2026-07-31 雷达连接与 2D 建图排障记录
+
+### 12.1 网络问题与最终配置
+
+本次不能连接雷达的根因不是 ROS、RViz、UDP 端口或防火墙，而是主机地址与雷达保存的目标地址不一致。
+
+- 旧记录中的主机地址：`192.168.1.5`
+- 雷达地址：`192.168.1.110`
+- 抓包发现雷达持续发送 ARP：`who-has 192.168.1.51 tell 192.168.1.110`
+- 最终主机地址：`192.168.1.51/24`
+- 活动连接：`Wired connection 2`
+- 雷达网卡：`enx00e04c0c6cc8`
+
+NetworkManager 配置：
+
+```bash
+nmcli connection modify 'Wired connection 2' \
+  ipv4.method manual \
+  ipv4.addresses 192.168.1.51/24 \
+  ipv4.gateway '' \
+  ipv4.dns '' \
+  ipv4.never-default yes
+nmcli connection up 'Wired connection 2'
+```
+
+驱动的源码配置和安装配置均已同步为：
+
+```text
+host_ip: 192.168.1.51
+lidar_ip: 192.168.1.110
+```
+
+网络恢复后的验证结果：雷达 ping 无丢包，Livox 驱动可以同时发布 `/livox/lidar` 和 `/livox/imu`。
+
+### 12.2 完整 2D 建图链路
+
+最终使用统一启动文件，避免 PointCloud2 模式与 FAST-LIO 所需的 Livox CustomMsg 类型冲突：
+
+```bash
+cd /home/hu/Desktop/bxi/mid360
+source /opt/ros/humble/setup.bash
+source ws_livox/install/setup.bash
+ros2 launch mid360_slam_toolbox mid360_slam_toolbox.launch.py
+```
+
+实际链路：
+
+```text
+MID360
+  -> livox_ros_driver2 (CustomMsg)
+  -> FAST-LIO
+  -> /cloud_registered_body
+  -> pointcloud_to_laserscan
+  -> /scan
+  -> slam_toolbox
+  -> /map
+```
+
+验证结果：
+
+- `/scan`：约 `10 Hz`
+- `/map`：约 `2 Hz`
+- 地图分辨率：`0.05 m`
+- FAST-LIO 可以完成 `IMU Initial Done`
+- RViz 可以显示 LaserScan、射线清空和 OccupancyGrid
+
+### 12.3 当前过滤与 slam_toolbox 参数
+
+点云转 LaserScan：
+
+```text
+target_frame: body
+min_height: -0.2 m
+max_height: 1.2 m
+range_min: 0.3 m
+range_max: 25.0 m
+angle_increment: 0.5 deg
+```
+
+为兼顾障碍实时更新与漂移抑制，slam_toolbox 当前使用：
+
+```text
+minimum_time_interval: 0.2 s
+minimum_travel_distance: 0.0 m
+minimum_travel_heading: 0.0 rad
+scan_buffer_size: 30
+map_update_interval: 0.5 s
+do_loop_closing: true
+```
+
+曾尝试将最小运动门限设置为 `0.05 m / 1 deg`。该配置可以减少静止噪声，但会导致雷达静止或小幅移动时不处理新扫描，表现为障碍和射线不更新，因此已撤销，改用 `0.2 s` 的时间间隔限制处理频率。
+
+### 12.4 漂移与显示说明
+
+- FAST-LIO 本身没有回环检测，长时间运行会有位置和航向漂移。
+- slam_toolbox 通过 `map -> camera_init` 修正全局地图定位，但不会反向修正 FAST-LIO 的原始 `/Odometry`。
+- 长期定位应使用 `map -> body`，不要把 `/Odometry` 当作全局无漂移位姿。
+- 建图开始后先让雷达静止 3 到 5 秒，再缓慢移动并尽量回到起点形成闭环。
+- `active samplers with a different type` 是当前虚拟机 OpenGL 的 RViz 警告，不代表地图数据停止。
+- `/map_updates` 没有发布者不代表地图不更新；当前 slam_toolbox 发布完整 `/map`，实测约 `2 Hz`。
+
+### 12.5 尚存问题
+
+- FAST-LIO 偶发输出 `No point, skip this scan` 或 `Too few input point cloud`，点云切片稀疏时更明显。
+- slam_toolbox 偶发 `Message Filter ... queue is full`，表示处理速度短时落后于输入速度。
+- Livox 驱动停止时可能以 `exit code -11` 退出；确认 SDK 已打印 `Deinit completely` 后，未发现残留进程。
+- slam_toolbox 停止时偶发 Karto 异常退出，但运行期间生成的 ROS 话题和地图不受影响。
+- 本次最后一轮地图没有单独保存。
+
+### 12.6 停止状态与后续目录
+
+本次结束时，Livox、FAST-LIO、pointcloud_to_laserscan、slam_toolbox 和 RViz 均已停止，无残留建图进程。雷达仍保持网络在线。
+
+后续工作目录已切换到：
+
+```text
+/home/hu/Desktop/bxi/bxi_rc_slam
+```
